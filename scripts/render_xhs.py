@@ -27,10 +27,12 @@
 
 import argparse
 import asyncio
+import json
 import os
 import re
 import sys
 import tempfile
+import html as html_lib
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -101,6 +103,55 @@ def split_content_by_separator(body: str) -> List[str]:
     return [part.strip() for part in parts if part.strip()]
 
 
+def escape_html(text: str) -> str:
+    return html_lib.escape(text, quote=True)
+
+
+def shorten_text(text: str, max_len: int) -> str:
+    text = text.strip()
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1].rstrip() + "…"
+
+
+def make_cover_hook(title: str, subtitle: str) -> str:
+    raw = f"{title} {subtitle}".strip()
+    if any(k in raw for k in ["教程", "制作", "怎么", "如何", "方法", "步骤"]):
+        return "收藏这篇，照着做就行"
+    if any(k in raw for k in ["名片", "简历", "头像", "封面", "海报"]):
+        return "3分钟做出专业感"
+    return "一看就会的实用教程"
+
+
+def build_cover_meta(metadata: dict) -> dict:
+    title = str(metadata.get("title", "标题")).strip()
+    subtitle = str(metadata.get("subtitle", "")).strip()
+    hook = make_cover_hook(title, subtitle)
+    accent = "商务" if any(k in f"{title} {subtitle}" for k in ["名片", "商务", "职业", "公司"]) else "教程"
+    top_tag = "电子名片制作教程" if any(k in f"{title} {subtitle}" for k in ["名片", "商务", "职业", "公司"]) else "实用教程"
+    if subtitle and (subtitle == title or subtitle == top_tag or subtitle in top_tag or top_tag in subtitle):
+        subtitle = ""
+    return {
+        "title": title,
+        "subtitle": subtitle or hook,
+        "hook": hook,
+        "accent": accent,
+        "top_tag": top_tag,
+    }
+
+
+def normalize_cover_text(text: str) -> str:
+    return re.sub(r'\s+', '', text.strip())
+
+
+def split_cover_title_lines(title: str) -> List[str]:
+    """标题尽量保持单行，超长时才启用自适应换行。"""
+    text = normalize_cover_text(title)
+    if not text:
+        return ["标题"]
+    return [text]
+
+
 def convert_markdown_to_html(md_content: str) -> str:
     """将 Markdown 转换为 HTML"""
     # 处理 tags（以 # 开头的标签）
@@ -145,46 +196,58 @@ def load_theme_css(theme: str) -> str:
 def generate_cover_html(metadata: dict, theme: str, width: int, height: int) -> str:
     """生成封面 HTML"""
     emoji = metadata.get('emoji', '📝')
-    title = metadata.get('title', '标题')
-    subtitle = metadata.get('subtitle', '')
-    
+    cover_meta = build_cover_meta(metadata)
+    title = cover_meta["title"]
+    subtitle = cover_meta["subtitle"]
+    hook = cover_meta["hook"]
+    accent = cover_meta["accent"]
+    top_tag = cover_meta["top_tag"]
+    title_lines = split_cover_title_lines(title)
+    title_html = "".join(f'<div class="cover-title-line">{escape_html(line)}</div>' for line in title_lines)
+    inner_width = int(width * 0.86)
+    title_box_width = int(inner_width * 0.78)
     
     # 动态调整标题字体大小
-    title_len = len(title)
-    if title_len <= 6:
-        title_size = int(width * 0.14)  # 极大
-    elif title_len <= 10:
-        title_size = int(width * 0.12)  # 大
-    elif title_len <= 18:
-        title_size = int(width * 0.09)  # 中
-    elif title_len <= 30:
-        title_size = int(width * 0.07)  # 小
+    title_len = len(re.sub(r'\s+', '', title))
+    if title_len <= 4:
+        title_size = int(width * 0.13)
+    elif title_len <= 6:
+        title_size = int(width * 0.115)
+    elif title_len <= 8:
+        title_size = int(width * 0.10)
+    elif title_len <= 12:
+        title_size = int(width * 0.088)
+    elif title_len <= 16:
+        title_size = int(width * 0.078)
     else:
-        title_size = int(width * 0.055) # 极小
+        title_size = int(width * 0.068)
+    title_size = min(title_size, int(title_box_width / max(title_len, 1) * 0.95))
+    title_size = max(title_size, int(width * 0.052))
+    title_gap = int(title_size * 0.12)
 
     # 获取主题背景色
     theme_backgrounds = {
-        'default': 'linear-gradient(180deg, #f3f3f3 0%, #f9f9f9 100%)',
-        'playful-geometric': 'linear-gradient(180deg, #8B5CF6 0%, #F472B6 100%)',
-        'neo-brutalism': 'linear-gradient(180deg, #FF4757 0%, #FECA57 100%)',
-        'botanical': 'linear-gradient(180deg, #4A7C59 0%, #8FBC8F 100%)',
-        'professional': 'linear-gradient(180deg, #2563EB 0%, #3B82F6 100%)',
-        'retro': 'linear-gradient(180deg, #D35400 0%, #F39C12 100%)',
-        'terminal': 'linear-gradient(180deg, #0D1117 0%, #21262D 100%)',
-        'sketch': 'linear-gradient(180deg, #555555 0%, #999999 100%)'
+        'default': 'radial-gradient(circle at top left, rgba(37,99,235,0.16), transparent 40%), linear-gradient(180deg, #F5F7FA 0%, #ECF2FF 100%)',
+        'playful-geometric': 'radial-gradient(circle at top left, rgba(255,255,255,0.25), transparent 30%), linear-gradient(180deg, #7C3AED 0%, #F472B6 100%)',
+        'neo-brutalism': 'radial-gradient(circle at top left, rgba(255,255,255,0.2), transparent 30%), linear-gradient(180deg, #111827 0%, #FECA57 100%)',
+        'botanical': 'radial-gradient(circle at top left, rgba(255,255,255,0.18), transparent 35%), linear-gradient(180deg, #1F7A57 0%, #9FD8B5 100%)',
+        'professional': 'radial-gradient(circle at top left, rgba(255,255,255,0.14), transparent 35%), linear-gradient(180deg, #0F3D91 0%, #3B82F6 100%)',
+        'retro': 'radial-gradient(circle at top left, rgba(255,255,255,0.18), transparent 35%), linear-gradient(180deg, #A84300 0%, #F5B041 100%)',
+        'terminal': 'radial-gradient(circle at top left, rgba(57,211,83,0.16), transparent 40%), linear-gradient(180deg, #0D1117 0%, #161B22 100%)',
+        'sketch': 'radial-gradient(circle at top left, rgba(255,255,255,0.18), transparent 35%), linear-gradient(180deg, #4B5563 0%, #A8B0BB 100%)'
     }
     bg = theme_backgrounds.get(theme, theme_backgrounds['default'])
 
     # 封面标题文字渐变随主题变化
     title_gradients = {
-        'default': 'linear-gradient(180deg, #111827 0%, #4B5563 100%)',
-        'playful-geometric': 'linear-gradient(180deg, #7C3AED 0%, #F472B6 100%)',
-        'neo-brutalism': 'linear-gradient(180deg, #000000 0%, #FF4757 100%)',
-        'botanical': 'linear-gradient(180deg, #1F2937 0%, #4A7C59 100%)',
-        'professional': 'linear-gradient(180deg, #1E3A8A 0%, #2563EB 100%)',
-        'retro': 'linear-gradient(180deg, #8B4513 0%, #D35400 100%)',
-        'terminal': 'linear-gradient(180deg, #39D353 0%, #58A6FF 100%)',
-        'sketch': 'linear-gradient(180deg, #111827 0%, #6B7280 100%)',
+        'default': 'linear-gradient(180deg, #0F172A 0%, #2563EB 100%)',
+        'playful-geometric': 'linear-gradient(180deg, #111111 0%, #111111 100%)',
+        'neo-brutalism': 'linear-gradient(180deg, #111111 0%, #111111 100%)',
+        'botanical': 'linear-gradient(180deg, #111111 0%, #111111 100%)',
+        'professional': 'linear-gradient(180deg, #111111 0%, #111111 100%)',
+        'retro': 'linear-gradient(180deg, #111111 0%, #111111 100%)',
+        'terminal': 'linear-gradient(180deg, #111111 0%, #111111 100%)',
+        'sketch': 'linear-gradient(180deg, #111111 0%, #111111 100%)',
     }
     title_bg = title_gradients.get(theme, title_gradients['default'])
     
@@ -195,8 +258,6 @@ def generate_cover_html(metadata: dict, theme: str, width: int, height: int) -> 
     <meta name="viewport" content="width={width}, height={height}">
     <title>小红书封面</title>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700;900&display=swap');
-        
         * {{
             margin: 0;
             padding: 0;
@@ -204,7 +265,7 @@ def generate_cover_html(metadata: dict, theme: str, width: int, height: int) -> 
         }}
         
         body {{
-            font-family: 'Noto Sans SC', 'Source Han Sans CN', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            font-family: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Heiti SC', sans-serif;
             width: {width}px;
             height: {height}px;
             overflow: hidden;
@@ -213,60 +274,206 @@ def generate_cover_html(metadata: dict, theme: str, width: int, height: int) -> 
         .cover-container {{
             width: {width}px;
             height: {height}px;
-            background: {bg};
+            background:
+                radial-gradient(circle at 18% 14%, rgba(56,189,248,0.16), transparent 18%),
+                radial-gradient(circle at 86% 18%, rgba(59,130,246,0.12), transparent 16%),
+                radial-gradient(circle at 78% 84%, rgba(34,197,94,0.08), transparent 20%),
+                linear-gradient(180deg, #eff8ff 0%, #f8fbff 52%, #eef6ff 100%);
             position: relative;
             overflow: hidden;
+        }}
+
+        .cover-accent {{
+            position: absolute;
+            inset: 0;
+            background:
+                radial-gradient(circle at 14% 18%, rgba(255,255,255,0.30), transparent 14%),
+                radial-gradient(circle at 82% 80%, rgba(255,255,255,0.18), transparent 16%);
+            pointer-events: none;
         }}
         
         .cover-inner {{
             position: absolute;
-            width: {int(width * 0.88)}px;
-            height: {int(height * 0.91)}px;
-            left: {int(width * 0.06)}px;
-            top: {int(height * 0.045)}px;
-            background: #F3F3F3;
-            border-radius: 25px;
+            width: {inner_width}px;
+            height: {int(height * 0.88)}px;
+            left: {int(width * 0.07)}px;
+            top: {int(height * 0.055)}px;
+            background: #ffffff;
+            border-radius: 36px;
             display: flex;
             flex-direction: column;
-            padding: {int(width * 0.074)}px {int(width * 0.079)}px;
+            padding: {int(width * 0.045)}px {int(width * 0.05)}px;
+            box-shadow: 0 18px 50px rgba(15,23,42,0.10);
+            border: 1px solid rgba(37,99,235,0.08);
         }}
         
-        .cover-emoji {{
-            font-size: {int(width * 0.167)}px;
-            line-height: 1.2;
-            margin-bottom: {int(height * 0.035)}px;
+        .cover-badge {{
+            display: inline-flex;
+            align-items: center;
+            width: fit-content;
+            padding: 10px 18px;
+            border-radius: 999px;
+            background: #d9efff;
+            color: #1d4ed8;
+            font-weight: 800;
+            font-size: {int(width * 0.034)}px;
+            margin-bottom: {int(height * 0.012)}px;
         }}
-        
-        .cover-title {{
-            font-weight: 900;
-            font-size: {title_size}px;
-            line-height: 1.4;
-            background: {title_bg};
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-            flex: 1;
+
+        .cover-top {{
+            flex: 0 0 auto;
+            min-height: {int(height * 0.16)}px;
             display: flex;
             align-items: flex-start;
-            word-break: break-all;
+            justify-content: space-between;
+            margin-bottom: {int(height * 0.012)}px;
+        }}
+
+        .cover-stack {{
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-start;
+            gap: 10px;
+            width: 100%;
+        }}
+
+        .cover-middle {{
+            flex: 1 1 auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 0;
+        }}
+
+        .cover-right {{
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+
+        .cover-title-stage {{
+            width: {title_box_width}px;
+            max-width: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            margin: 0 auto;
+        }}
+
+        .cover-title-wrap {{
+            display: flex;
+            flex-direction: column;
+            gap: {title_gap}px;
+            margin-top: 0;
+            width: 100%;
+            align-items: center;
+        }}
+
+        .cover-title-line {{
+            font-weight: 900;
+            font-size: {title_size}px;
+            line-height: 0.95;
+            color: #111111;
+            display: inline-block;
+            white-space: nowrap;
+            word-break: keep-all;
+            letter-spacing: -0.08em;
+            max-width: 100%;
+            text-align: center;
         }}
         
-        .cover-subtitle {{
-            font-weight: 350;
-            font-size: {int(width * 0.067)}px;
-            line-height: 1.4;
-            color: #000000;
-            margin-top: auto;
+        .cover-bottom {{
+            flex: 0 0 auto;
+            min-height: {int(height * 0.16)}px;
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            padding-top: 8px;
         }}
+
+        .cover-subtitle {{
+            font-weight: 600;
+            font-size: {int(width * 0.024)}px;
+            line-height: 1.35;
+            color: #111111;
+            max-width: 100%;
+            text-align: center;
+        }}
+
+        .cover-underline {{
+            width: 100%;
+            max-width: 100%;
+            height: 9px;
+            border-radius: 999px;
+            background: linear-gradient(90deg, #38bdf8 0%, #22c55e 100%);
+            margin-top: 4px;
+            box-shadow: 0 4px 0 #111111;
+        }}
+
     </style>
 </head>
 <body>
     <div class="cover-container">
+        <div class="cover-accent"></div>
         <div class="cover-inner">
-            <div class="cover-emoji">{emoji}</div>
-            <div class="cover-title">{title}</div>
-            <div class="cover-subtitle">{subtitle}</div>
+            <div class="cover-top">
+                <div class="cover-stack">
+                    <div class="cover-badge">{top_tag}</div>
+                </div>
+            </div>
+            <div class="cover-middle">
+                <div class="cover-right">
+                    <div class="cover-title-stage">
+                    <div class="cover-title-wrap">{title_html}</div>
+                    <div class="cover-underline"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="cover-bottom">
+                <div class="cover-subtitle">{subtitle}</div>
+            </div>
         </div>
+        <script>
+        (function() {{
+            const stage = document.querySelector('.cover-title-stage');
+            const wrap = document.querySelector('.cover-title-wrap');
+            const line = document.querySelector('.cover-title-line');
+            const underline = document.querySelector('.cover-underline');
+            if (!stage || !wrap || !line || !underline) return;
+
+            const minFontSize = {max(int(width * 0.052), 52)};
+            const maxFontSize = {title_size};
+            const maxWidth = stage.clientWidth;
+            const maxHeight = Math.max(140, Math.floor({int(height * 0.18)}));
+
+            let size = maxFontSize;
+            line.style.whiteSpace = 'nowrap';
+            line.style.fontSize = size + 'px';
+            line.style.lineHeight = '0.95';
+            line.style.letterSpacing = '-0.08em';
+
+            let steps = 0;
+            while ((line.scrollWidth > maxWidth || wrap.scrollHeight > maxHeight) && size > minFontSize && steps < 40) {{
+                size -= 2;
+                steps += 1;
+                line.style.fontSize = size + 'px';
+            }}
+
+            if (line.scrollWidth > maxWidth || wrap.scrollHeight > maxHeight) {{
+                line.style.whiteSpace = 'normal';
+                line.style.wordBreak = 'break-word';
+                line.style.lineHeight = '0.98';
+                line.style.letterSpacing = '-0.06em';
+                size = Math.max(minFontSize, size - 2);
+                line.style.fontSize = size + 'px';
+            }}
+
+            underline.style.width = Math.min(line.getBoundingClientRect().width, maxWidth) + 'px';
+        }})();
+        </script>
     </div>
 </body>
 </html>'''
@@ -355,6 +562,40 @@ def generate_card_html(content: str, theme: str, page_number: int = 1,
             backdrop-filter: blur(10px);
         '''
         content_style = ''
+
+    page_header = ""
+    body = content.strip()
+    heading_match = re.match(r'^(#{1,2})\s+(.+)$', body, re.MULTILINE)
+    if heading_match:
+        heading_text = heading_match.group(2).strip()
+        page_header = shorten_text(heading_text, 20)
+    else:
+        page_header = f"第 {page_number} 页"
+
+    # 给正文增加更明确的视觉引导
+    def enhance_body(raw: str) -> str:
+        lines = raw.splitlines()
+        out = []
+        for line in lines:
+            m = re.match(r'^(#{1,3})\s+(.+)$', line)
+            if m:
+                level = len(m.group(1))
+                text = m.group(2).strip()
+                out.append(f'<div class="step-head step-head-{level}">{escape_html(text)}</div>')
+                continue
+            bullet = re.match(r'^[-*]\s+(.+)$', line)
+            if bullet:
+                out.append(f'<div class="bullet-line">• {escape_html(bullet.group(1).strip())}</div>')
+                continue
+            numbered = re.match(r'^\d+\.\s+(.+)$', line)
+            if numbered:
+                out.append(f'<div class="number-line">{escape_html(line.strip())}</div>')
+                continue
+            out.append(line)
+        return "\n".join(out)
+
+    content = enhance_body(content)
+    html_content = convert_markdown_to_html(content)
     
     html = f'''<!DOCTYPE html>
 <html lang="zh-CN">
@@ -363,8 +604,7 @@ def generate_card_html(content: str, theme: str, page_number: int = 1,
     <meta name="viewport" content="width={width}">
     <title>小红书卡片</title>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700;900&display=swap');
-        
+
         * {{
             margin: 0;
             padding: 0;
@@ -372,7 +612,7 @@ def generate_card_html(content: str, theme: str, page_number: int = 1,
         }}
         
         body {{
-            font-family: 'Noto Sans SC', 'Source Han Sans CN', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            font-family: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Heiti SC', sans-serif;
             width: {width}px;
             overflow: hidden;
             background: transparent;
@@ -381,14 +621,41 @@ def generate_card_html(content: str, theme: str, page_number: int = 1,
         .card-container {{
             {container_style}
         }}
+
+        .card-shell {{
+            position: absolute;
+            top: 28px;
+            left: 28px;
+            right: 28px;
+            height: 88px;
+            display: flex;
+            align-items: center;
+            padding: 0 32px;
+            border-radius: 22px;
+            background: rgba(255,255,255,0.22);
+            backdrop-filter: blur(14px);
+            border: 1px solid rgba(255,255,255,0.3);
+            color: white;
+            z-index: 2;
+        }}
+
+        .card-shell-title {{
+            font-size: 34px;
+            font-weight: 900;
+            letter-spacing: 0.02em;
+        }}
         
         .card-inner {{
             {inner_style}
+            position: relative;
+            top: 72px;
+            height: calc(100% - 72px);
         }}
         
         .card-content {{
             line-height: 1.7;
             {content_style}
+            margin-top: 10px;
         }}
 
         /* auto-fit 用：对整个内容块做 transform 缩放 */
@@ -412,10 +679,52 @@ def generate_card_html(content: str, theme: str, page_number: int = 1,
             color: rgba(255, 255, 255, 0.8);
             font-weight: 500;
         }}
+
+        .step-head {{
+            display: inline-block;
+            margin: 38px 0 22px 0;
+            padding: 14px 22px;
+            border-radius: 16px;
+            background: linear-gradient(135deg, rgba(139,92,246,0.16), rgba(244,114,182,0.08));
+            color: #111827;
+            border-left: 10px solid #8B5CF6;
+            font-weight: 800;
+            box-shadow: 5px 5px 0 rgba(30,41,59,0.12);
+        }}
+
+        .step-head-1 {{
+            font-size: 58px;
+        }}
+
+        .step-head-2 {{
+            font-size: 48px;
+        }}
+
+        .step-head-3 {{
+            font-size: 42px;
+        }}
+
+        .bullet-line {{
+            margin: 12px 0 12px 8px;
+            padding-left: 18px;
+            border-left: 4px solid rgba(139,92,246,0.22);
+        }}
+
+        .number-line {{
+            margin: 12px 0;
+            padding: 12px 18px;
+            background: rgba(251,191,36,0.15);
+            border-radius: 14px;
+            color: #111827;
+            font-weight: 700;
+        }}
     </style>
 </head>
 <body>
     <div class="card-container">
+        <div class="card-shell">
+            <div class="card-shell-title">{escape_html(page_header)}</div>
+        </div>
         <div class="card-inner">
             <div class="card-content">
                 <div class="card-content-scale">{html_content}</div>
@@ -529,9 +838,36 @@ async def render_html_to_image(html_content: str, output_path: str,
 async def auto_split_content(body: str, theme: str, width: int, height: int, 
                              dpr: int = 2) -> List[str]:
     """自动切分内容：根据渲染后的高度自动分页"""
-    
-    # 将内容按段落分割
-    paragraphs = re.split(r'\n\n+', body)
+    def semantic_blocks(text: str) -> List[str]:
+        """优先按标题语义切块，尽量保留标题与其后正文在同一页。"""
+        lines = text.splitlines()
+        blocks: List[str] = []
+        current: List[str] = []
+
+        def flush() -> None:
+            nonlocal current
+            block = "\n".join(current).strip()
+            if block:
+                blocks.append(block)
+            current = []
+
+        for line in lines:
+            stripped = line.strip()
+            if re.match(r'^#{1,3}\s+', stripped):
+                if current:
+                    flush()
+                current.append(stripped)
+                continue
+
+            if not stripped and current and current[-1] == "":
+                continue
+
+            current.append(line)
+
+        flush()
+        return blocks
+
+    paragraphs = semantic_blocks(body)
     
     cards = []
     current_content = []
@@ -545,7 +881,7 @@ async def auto_split_content(body: str, theme: str, width: int, height: int,
         
         try:
             for para in paragraphs:
-                # 尝试将当前段落加入
+                # 尝试将当前块加入
                 test_content = current_content + [para]
                 test_md = '\n\n'.join(test_content)
                 
